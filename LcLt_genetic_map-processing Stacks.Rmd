@@ -1,0 +1,437 @@
+---
+title: "LcLt genetic map"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+
+library(knitr)
+library(kableExtra)
+library(prettydoc)
+library(ggplot2)
+library(tidyverse)
+
+```
+
+
+```{bash}
+
+# format onemap file: remove first 3 lines and * at the beginning of the lines
+tmp=`wc -l batch_1.genotypes_1.onemap.txt`
+nrow=`echo $tmp | cut -f 1 -d ' '`
+
+tail -n `echo $nrow-3 | bc -l` batch_1.genotypes_1.onemap.txt > tmp
+sed 's/*//' tmp > batch_1.genotypes_1.onemap.formated.txt
+
+
+# format rqtl file: remove first 4 lines
+tmp=`wc -l batch_1.genotypes_1.rqtl.tsv`
+nrow=`echo $tmp | cut -f 1 -d ' '`
+
+tail -n `echo $nrow-4 | bc -l` batch_1.genotypes_1.rqtl.tsv > batch_1.genotypes_1.rqtl.formated.txt
+
+rm tmp
+
+```
+
+### Link genotype data with marker data
+
+Next the genotype data from the onemap file is linked to the marker info and individual ID's from the rqtl file. This is done in this way because the onemap file has more accurate calls for genotypes than the rqtl file. But the onemap format doesn't have marker positions or individual ID's.
+
+
+```{r}
+##  read formatted files from stacks output
+genotype_data <- read.table("batch_1.genotypes_1.onemap.formated.txt",
+                            sep = " ", row.names = 1, colClasses = "character")
+marker_data <- read.csv("batch_1.genotypes_1.rqtl.formated.txt",
+                        header = FALSE, colClasses = "character")[1:3,-1]
+ind_numbers <- read.csv("batch_1.genotypes_1.rqtl.formated.txt",
+                        header = FALSE, skip = 3)[,1]
+
+##  parse marker_data
+tmp <- t(marker_data) %>% as.data.frame() %>% 
+  unite("pos", c(2, 3), sep = "_")
+
+tmp <- tmp[grep("[0-9]",tmp$`1`),] #R has trouble reading this file and adds extra lines
+                                   # this step removes those extra lines
+colnames(tmp) <- c("ID", "pos")
+
+##  parse genotype data
+genotype_data <- genotype_data %>% rownames_to_column(var = "ID")
+
+genotype_data[1:10,1:10]
+
+##  merge data sets
+map <- right_join(tmp, genotype_data, by = "ID")
+colnames(map) <- c(colnames(map)[1:2], ind_numbers)
+  
+##  export table
+write.csv(map, "batch_1.genotypes_1.merge_sire3492.txt",
+          row.names = FALSE, quote = FALSE)
+
+rm(genotype_data, map, marker_data, tmp, ind_numbers)
+```
+
+### Sort markers according to their genomic position
+
+```{bash, eval = FALSE}
+# I ran this code on the current working directory on my laptop
+cut -f 2 -d ',' batch_1.genotypes_1.merge_sire3492.txt | cut -f 3 -d '_' > tmp_pos
+cut -f 2 -d ',' batch_1.genotypes_1.merge_sire3492.txt | cut -f 1,2 -d '_' | sed 's/^pos/scaffold/' > tmp_scaffold
+paste -d ',' tmp_scaffold tmp_pos batch_1.genotypes_1.merge_sire3492.txt > tmp2
+cat tmp2 | sort -t "," -k 1,1 -k 2,2n | cut -f 1,3- -d ',' > batch_1.genotypes_1.merge_sire3492.sorted.txt 
+
+# the header ends up at the end, so these lines are necessary to put it back in place
+head -27269 batch_1.genotypes_1.merge_sire3492.sorted.txt > tmp
+tail -1 batch_1.genotypes_1.merge_sire3492.sorted.txt > tmp_header
+cat tmp_header tmp > batch_1.genotypes_1.merge_sire3492.sorted.txt
+
+rm tmp*
+```
+
+### Format merged file to rqtl format
+
+It's necessary to load the sorted file back into R in order to transpose it and have a more similar format to the one rqtl requires. In addition, the genotypes are flipped in this step so Lica's have the A allele and Latr's the B allele.
+
+```{r}
+# read sorted file
+map <- read.csv("batch_1.genotypes_1.merge_sire3492.sorted.txt", header = TRUE, check.names = FALSE)
+map[1:10,1:10]
+
+# transpose merged and sorted file
+tmp <- t(map)
+dim(tmp)
+tmp[1:10,1:10]
+
+# format output file
+# First place the names of the markers as the column names
+# Second, place the scaffold names in the first row
+map_transposed <- matrix(ncol = ncol(tmp)+1, nrow = nrow(tmp)-2)
+colnames(map_transposed) <- c("ID", tmp[3,])
+map_transposed[1,] <- c("", tmp[1,])
+
+# Third, sort the genotype data by individual ID and
+# place the individual ID's and genotype info starting from row number 4
+tmp.genotype <- cbind(rownames(tmp)[4:nrow(tmp)], tmp[4:nrow(tmp),])
+tmp.genotype.sort <- tmp.genotype[order(as.numeric(tmp.genotype[,1])),]
+map_transposed[2:nrow(map_transposed),] <- tmp.genotype.sort
+map_transposed[1:10,1:10]
+
+# flip genotypes: a,A -> B; b,B -> A; h,H -> AB
+map_transposed[map_transposed == "a"] <- "XX"
+map_transposed[map_transposed == "A"] <- "XX"
+
+map_transposed[map_transposed == "h"] <- "AB"
+map_transposed[map_transposed == "H"] <- "AB"
+
+map_transposed[map_transposed == "b"] <- "AA"
+map_transposed[map_transposed == "B"] <- "AA"
+
+map_transposed[map_transposed == "XX"] <- "BB"
+
+map_transposed[1:10,1:10]
+
+## export transponsed table (which will be useful in the next step)
+write.csv(map_transposed, "batch_1.genotypes_1.merge_sire3492.sorted.transposed.genotyped_flipped.rqtl.csv",
+          row.names = FALSE, quote = FALSE)
+
+rm(map, map_transposed, tmp, tmp.genotype, tmp.genotype.sort)
+
+```
+
+### Note on genotype nomenclature
+
+One detail I didn't consider while runnning the Stacks pipeline was specifying a particular letter (A or B) to the alleles of a particular parent. I used the code below to find the relationship between genotype letters and the parents: Latr -> A, Lica -> B.
+
+In order to prevent confussion in later steps, I created an additional file, *batch_1.genotypes_1.merge_sire3492.rqtl.genotypes_flipped.csv*, where the Lica (the dam) alleles are assigned the letter A, and the Latr (the sire) alleles are assigned the letter B
+
+
+```{bash, eval = FALSE}
+# I ran the following commands in the cluster
+
+# Look at the first lines of the haplotypes file, so I can see the genotypes (in nucleotides) of all individuals for each marker
+acarmon@node0:~/projects/LcLt/LcLt3492_round11-16m2$ head batch_1.haplotypes_1.tsv 
+
+# In this case I chose to use marker 2 as reference
+# Then I look for the ID of this marker in the models file of the Latr parent
+acarmon@node0:~/projects/LcLt/LcLt3492_round11-16m2$ zcat Latr-P0-3492.models.tsv.gz | grep --color "NC_036780.1        10000268        "
+
+# Finally I look for the genotype of the Latr parent at this particular locus in the matches file
+acarmon@node0:~/projects/LcLt/LcLt3492_round11-16m2$ zcat Latr-P0-3492.matches.tsv.gz | grep --color "  8       [ATCG]"
+
+#The output has an "A" in the 6th column, therefore (based on the observations of the haplotypes file) Latr alleles were assigned the letter "a". 
+
+# Then I repeat the same steps with the Lica parent to make sure it has the opposite allele
+acarmon@node0:~/projects/LcLt/LcLt3492_round11-16m2$ zcat Lica-P0.models.tsv.gz | grep --color "NC_036780.1     10000268        "
+acarmon@node0:~/projects/LcLt/LcLt3492_round11-16m2$ zcat Lica-P0.matches.tsv.gz | grep --color "       8       [ATCG]"
+
+# According to expectation, on the sixth column of the Lica matches file, there's a G (the alternative allele), therefore, Lica's were assigned the letter 'b'
+```
+
+### Load input data into R/qtl
+
+By looking the diagnostic tests below, I realized that samples 915-930 are actually MmAk's. I went back to the list of samples and made sure I knew which ones are LcLt's and removed the rest. I also checked if Stacks ignored Latr-3536 and Latr-3567 while running the genotype's script, and it does. The genotypes program from Stacks only reads the samples that have a "matches" file, therefore the other two possible P0 sires are ignored, i.e., there are no problems with the Stacks runs.
+
+The excel file *samples_round11-16m3.xlsx* contains the list of samples for RADseq runs 11 - 16 and the family each of the individuals come from. This group of samples contains 18 non-LcLt samples that were removed from the *batch_1.genotypes_1.merge_sire3492.rqtl.csv* and *batch_1.genotypes_1.merge_sire3492.rqtl.genotypes_flipped.csv* files. There should be 266 LcLt samples total.
+
+The following code looks at basic statistics: number of samples, markers, missing data, etc.
+
+
+```{r, eval=FALSE}
+cross <- read.cross("csv", dir = "./",
+                    file = "batch_1.genotypes_1.merge_sire3492.sorted.transposed.genotyped_flipped.rqtl.csv",
+                    estimate.map = FALSE, genotypes = c("AA","AB","BB"))
+
+# check if the cross type was determined correctly
+# and that the number of ind and markers is as expected
+summary(cross)
+
+# remove individuals that are not part of the F2 population
+for(i in c(1005, 1006, 915:930))
+{
+  cross <- subset(cross, ind = cross$pheno$ID != i)
+}
+summary(cross)
+
+# plot number of genotypes by ind and markers
+par(mfrow = c(1,2), las = 1)
+plot(ntyped(cross), ylab = "No. typed markers", main = "No. genotypes by individual")
+plot(ntyped(cross, "mar"), ylab = "No. typed individuals", main = "No. genotypes by marker")
+plot(ntyped(cross), ylab = "No. typed markers", main = "No. genotypes by individual", col = tmp$sequencer)
+
+# plot number of genotypes by ind, highlighting samples from Hiseq4000
+# I could modify this code to color code the dots by round of RAD-seq. But it's not that important and I'll keep going for now.
+tmp <- data.frame(ID = as.numeric(names(ntyped(cross))),
+                  ntyped = ntyped(cross),
+                  sex = cross$
+                  sequencer = "gray30", stringsAsFactors = FALSE)
+tmp$sequencer[tmp$ID < 1272] <- "gray30"
+tmp$sequencer[tmp$ID >= 1272] <- "blue"
+#tmp %>% 
+  ggplot(tmp, aes(x = ID, y = ntyped, color = sequencer)) +
+  geom_point(size = 3) +
+  theme_light()
+
+# identify duplicate individuals
+cg <- comparegeno(cross)
+par(mfrow = c(1,1))
+hist(cg[lower.tri(cg)], breaks = seq(0, 1, len = 101), 
+     xlab = "No. matching genotypes", 
+     main = "Histogram of proportion of matching genotypes between individuals")
+rug(cg[lower.tri(cg)])
+
+
+# Look for markers with distorted segregation patterns
+gt <- geno.table(cross)
+gt[gt$P.value < 0.01/totmar(cross),] %>% dim
+
+
+# study individual's genotype frequencies
+g <- pull.geno(cross)
+gfreq <- apply(g, 1, function(a) table(factor(a, levels = 1:3)))
+gfreq <- t(t(gfreq) / colSums(gfreq))
+par(mfrow = c(1,3), las = 1)
+for(i in 1:3)
+  plot(gfreq[i,], ylab = "Genotype frequency", main = c("AA", "AB", "BB")[i],
+       ylim = c(0,1))
+
+
+# look at pattern of missing data
+plotMissing(cross)
+```
+
+Keep markers with genotype info in at least 80% of the samples
+```{r}
+# Keep markers with genotype info in at least 80% of the samples
+nt.bymar <- ntyped(cross, "mar")
+todrop <- names(nt.bymar[nt.bymar < 290])
+write.csv(todrop, "dropped_markers_present_in_lt_290ind.txt")
+cross <- drop.markers(cross, todrop)
+summary(cross)
+
+
+# plot number of genotypes by ind and markers
+par(mfrow = c(1,2), las = 1)
+plot(ntyped(cross), ylab = "No. typed markers", main = "No. genotypes by individual")
+plot(ntyped(cross, "mar"), ylab = "No. typed individuals", main = "No. genotypes by marker")
+
+
+# study individual's genotype frequencies
+g <- pull.geno(cross)
+gfreq <- apply(g, 1, function(a) table(factor(a, levels = 1:3)))
+gfreq <- t(t(gfreq) / colSums(gfreq))
+par(mfrow = c(1,3), las = 1)
+for(i in 1:3)
+  plot(gfreq[i,], ylab = "Genotype frequency", main = c("AA", "AB", "BB")[i],
+       ylim = c(0,1))
+
+# look at profile of missing data
+pdf("missing_data_362ind-maxmissingdata-0.2.pdf")
+for(i in 1:25)
+  plotMissing(cross, chr = chrnames(cross)[i])
+dev.off()
+
+# Estimate recombination frequencies
+cross <- est.rf(cross)
+
+# look at profile of recomb freq
+pdf("RFplots_362ind-maxmissingdata-0.2.pdf")
+for(i in 1:22)
+  plotRF(cross, chr = chrnames(cross)[i])
+dev.off()
+
+# Form linkage groups
+lg <- formLinkageGroups(cross, max.rf = 0.14, min.lod = 6)
+table(lg[,2])
+
+cross_maxmissing0.8.reorg <- formLinkageGroups(cross, max.rf = 0.14, min.lod = 6, reorgMarkers = TRUE)
+
+# look at profile of recomb freq
+pdf("RFplots_362ind-maxmissingdata-0.2.reorg.pdf")
+for(i in 1:22)
+  plotRF(cross_maxmissing0.8.reorg, chr = i)
+dev.off()
+
+
+save(cross, file = "cross_maxmissing0.8.Rdata")
+
+
+```
+
+```{r}
+chr_info <- function(cross, chr = "NC_036799.1"){
+  # overall
+  tmp <- pull.geno(cross, chr = chr)
+  tmp.map <- pull.map(cross)
+  overall <- apply(tmp, MARGIN = 2, function(x) length(which(is.na(x))))
+  AA <- apply(tmp, MARGIN = 2, function(x) round(length(which(x == 1))/length(which(!is.na(x))),4))
+  AB <- apply(tmp, MARGIN = 2, function(x) round(length(which(x == 2))/length(which(!is.na(x))),4))
+  BB <- apply(tmp, MARGIN = 2, function(x) round(length(which(x == 3))/length(which(!is.na(x))),4))
+  df <- rbind(names(tmp.map[[chr]]),
+              as.numeric(tmp.map[[chr]]), 
+              overall, AA, AB, BB)
+  df <- t(df) %>% 
+    as.data.frame()
+  colnames(df) <- c("ID", "pos", "missing", "AA","AB","BB")
+  df <- df %>% select(ID, pos, missing, AA, AB, BB)
+  df$pos <- as.character(df$pos) %>% as.numeric()
+  df$missing <- as.character(df$missing) %>% as.numeric()
+  df$AA <- as.character(df$AA) %>% as.numeric()
+  df$AB <- as.character(df$AB) %>% as.numeric()
+  df$BB <- as.character(df$BB) %>% as.numeric()
+  return(df)
+}
+
+chr_info(cross, chrnames(cross)[2])
+
+#cross_maxmissing0.4 <- cross
+#cross_maxmissing0.7 <- cross
+cross_maxmissing0.7 <- cross
+
+cross.subset0.4 <- subset(cross_maxmissing0.4, chr = chrnames(cross_maxmissing0.4)[8:10])
+cross.subset0.7 <- subset(cross_maxmissing0.7, chr = chrnames(cross_maxmissing0.7)[8:10])
+
+cross.subset0.4$geno$NC_036787.1$data[is.na(cross.subset0.4$geno$NC_036787.1$data)] <- "-"
+cross.subset0.4$geno$NC_036788.1$data[is.na(cross.subset0.4$geno$NC_036788.1$data)] <- "-"
+cross.subset0.4$geno$NC_036789.1$data[is.na(cross.subset0.4$geno$NC_036789.1$data)] <- "-"
+
+cross.subset0.4$geno$NC_036787.1$data %>% t() %>% 
+  write.table("cross.subset_chr9810.maxmissingdata_0.6.txt", 
+              col.names = FALSE,
+              sep = " ",
+              quote = FALSE)
+cross.subset0.4$geno$NC_036788.1$data %>% t() %>% 
+  write.table("cross.subset_chr9810.maxmissingdata_0.6.txt", 
+              col.names = FALSE,
+              sep = " ",
+              append = TRUE,
+              quote = FALSE)
+cross.subset0.4$geno$NC_036789.1$data %>% t() %>% 
+  write.table("cross.subset_chr9810.maxmissingdata_0.6.txt", 
+              col.names = FALSE,
+              sep = " ",
+              append = TRUE,
+              quote = FALSE)
+
+cross.subset0.7$geno$NC_036787.1$data[is.na(cross.subset0.7$geno$NC_036787.1$data)] <- "-"
+cross.subset0.7$geno$NC_036788.1$data[is.na(cross.subset0.7$geno$NC_036788.1$data)] <- "-"
+cross.subset0.7$geno$NC_036789.1$data[is.na(cross.subset0.7$geno$NC_036789.1$data)] <- "-"
+
+cross.subset0.7$geno$NC_036787.1$data %>% t() %>%
+  write.table("cross.subset_chr9810.maxmissingdata_0.3.txt", 
+              col.names = FALSE,
+              sep = " ",
+              quote = FALSE)
+cross.subset0.7$geno$NC_036788.1$data %>% t() %>% 
+  write.table("cross.subset_chr9810.maxmissingdata_0.3.txt", 
+              col.names = FALSE,
+              sep = " ",
+              append = TRUE,
+              quote = FALSE)
+cross.subset0.7$geno$NC_036789.1$data %>% t() %>% 
+  write.table("cross.subset_chr9810.maxmissingdata_0.3.txt", 
+              col.names = FALSE,
+              sep = " ",
+              append = TRUE,
+              quote = FALSE)
+
+
+
+
+
+```
+
+### Exploring chromosome 1
+```{r}
+cross20.chr1 <- subset(cross, chr = chrnames(cross)[1])
+cross20.chr1$geno$NC_036780.1$map %>% names %>% View
+
+#pdf("RFplots_362ind-maxmissingdata-0.2.chr1.pdf")
+#plotRF(cross20.chr1)
+#dev.off()
+
+# plot number of genotypes by ind and markers
+par(mfrow = c(1,2), las = 1)
+plot(ntyped(cross20.chr1), ylab = "No. typed markers", main = "No. genotypes by individual")
+plot(ntyped(cross20.chr1, "mar"), ylab = "No. typed individuals", main = "No. genotypes by marker")
+
+
+# study individual's genotype frequencies
+g <- pull.geno(cross20.chr1)
+gfreq <- apply(g, 1, function(a) table(factor(a, levels = 1:3)))
+gfreq <- t(t(gfreq) / colSums(gfreq))
+par(mfrow = c(1,3), las = 1)
+for(i in 1:3)
+  plot(gfreq[i,], ylab = "Genotype frequency", main = c("AA", "AB", "BB")[i],
+       ylim = c(0,1))
+
+# look at profile of missing data
+plotMissing(cross20.chr1)
+
+rf <- pull.rf(cross20.chr1)
+lod <- pull.rf(cross20.chr1, what="lod")
+plot(as.numeric(rf), as.numeric(lod), xlab="Recombination fraction", ylab="LOD score")
+
+which(rf > 0.7, arr.ind = TRUE)
+rf[152,5]
+
+tmp <- cross20.chr1$geno$NC_036780.1$data
+dim(tmp)
+tmp[,c(5,152)] %>% View
+
+pdf("RFplots_362ind-maxmissingdata-0.2.chr1vsAll.rf.pdf")
+for(i in 1:22){
+  plotRF(cross, what = "rf", chr = c(chrnames(cross)[1], chrnames(cross)[i]))
+}
+dev.off()
+
+pdf("RFplots_362ind-maxmissingdata-0.2.chr1vsAll.lod.pdf")
+for(i in 1:22){
+  plotRF(cross, what = "rf", chr = c(chrnames(cross)[1], chrnames(cross)[i]))
+}
+dev.off()
+
+
+
+```
+
