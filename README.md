@@ -1,2 +1,2 @@
 # Biology2022
-Labidochromis x Labeotropheus genetic map assembly
+Code related to Biology article about quantitative trait loci (QTL) mapping of craniofacial adaptations in a hybrid cross of Labidochromis caeruleus and Labeotropheus trewavasae cichlid fishes. Scripts were used to call genotypes and generate the linkage map. Please cite: DeLorenzo L, DeBrock V, Carmona Baez A, Ciccotto PJ, Peterson EN, Stull C, Roberts NB, Roberts RB, Powder KE. 2022. Morphometric and genetic description of trophic adaptations in cichlid fishes. Biology xx(xx):pg-pg. doi: xxxx
